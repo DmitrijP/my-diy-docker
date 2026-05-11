@@ -1,0 +1,26 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+UseTab: Never
+
+BreakBeforeBraces: Attach
+
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: false
+
+IncludeBlocks: Preserve
+SeparateDefinitionBlocks: Always
+
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+ContinuationIndentWidth: 8
+
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+AlignTrailingComments: true
+
+ColumnLimit: 100

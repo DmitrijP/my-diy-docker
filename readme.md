@@ -1,23 +1,84 @@
 # DIY Docker Engine Tutorial 
 
+- [DIY Docker Engine Tutorial](#diy-docker-engine-tutorial)
+  - [Einleitung](#einleitung)
+  - [Table of contents](#table-of-contents)
+  - [Voraussetzungen](#voraussetzungen)
+  - [Was ist Docker](#was-ist-docker)
+  - [Vorbereitung](#vorbereitung)
+    - [Terminal färben](#terminal-färben)
+    - [Platzhalterprozesse](#platzhalterprozesse)
+    - [Prozesse beenden](#prozesse-beenden)
+    - [Docker Container](#docker-container)
+  - [Namespaces - Isolation](#namespaces---isolation)
+    - [PID eigener Prozessbaum](#pid-eigener-prozessbaum)
+  - [MNT eigenes Dateisystem](#mnt-eigenes-dateisystem)
+    - [Einleitung](#einleitung-1)
+    - [Was ist ein Mount](#was-ist-ein-mount)
+    - [chroot der Blickwinkel eines Prozesses](#chroot-der-blickwinkel-eines-prozesses)
+    - [Alles zusammenführen](#alles-zusammenführen)
+  - [overlayfs Dateisystem in Schichten](#overlayfs-dateisystem-in-schichten)
+    - [Tests des Dateisystems](#tests-des-dateisystems)
+  - [NET eigenes Netztwerkinterfrace](#net-eigenes-netztwerkinterfrace)
+    - [Einleitung](#einleitung-2)
+    - [Vorbereitung](#vorbereitung-1)
+    - [Das Netz](#das-netz)
+    - [Erstellen eines Interfaces](#erstellen-eines-interfaces)
+    - [Namespace erstellen und Link verschieben](#namespace-erstellen-und-link-verschieben)
+    - [Verbindung aufbauen und testen](#verbindung-aufbauen-und-testen)
+    - [Mehrere Container über Bridge verbinden](#mehrere-container-über-bridge-verbinden)
+  - [UTS eigener Hostname](#uts-eigener-hostname)
+    - [USER Namespace - rootless Container](#user-namespace---rootless-container)
+  - [IPC Namespace - Shared Memory Isolation](#ipc-namespace---shared-memory-isolation)
+      - [ipcmk + ipcs Demo](#ipcmk--ipcs-demo)
+  - [cgroups - Ressourcenlimits](#cgroups---ressourcenlimits)
+    - [CPU, RAM, IO Grenzen](#cpu-ram-io-grenzen)
+  - [Quellen](#quellen)
+
+
 ## Einleitung
-In diesem Tutorial werden wir unser eigenes Docker aufbauen um zu verstehen was Docker ist und wie es funktioniert.
+In diesem Tutorial bauen wir unsere eigene Container-Runtime, um zu verstehen,
+wie Docker unter der Haube funktioniert.
+
+Docker ist kein Magie - es sind Linux-Kernel-Features: Namespaces für Isolation,
+cgroups für Ressourcenlimits und overlayfs für Images. Wer diese Primitives versteht,
+versteht Docker.
+
+Wir arbeiten in zwei Phasen:
+1. **Linux-Hands-on** - jedes Primitive einzeln in der Shell ausprobieren
+2. **Go-Implementierung** - alle Teile zu einer eigenen Container-Runtime zusammenbauen
+
+## Table of contents
+
 
 ## Voraussetzungen
-- eine Programmiersprache, am besten GO
+- eine VM oder Docker
+- einfache Dockerkentnisse
 - einfache Linuxkentnisse
 - einfache Netzwerkkentnisse
+- eine Programmiersprache, am besten GO
 
-## 0. Was ist Docker
-Docker ist ein Prozess der auf dem Linux Betriebssystem aufsetzt und dessen Funktionalitäten nutzt um Anwendungen voneinander mit Hilfe von Namespaces zu isolieren.
+## Was ist Docker
 
-### 0.1 Docker Container
+Docker ist eine Container-Runtime die auf Linux-Kernel-Features aufbaut, um Prozesse 
+zu isolieren und zu verwalten. Drei Bausteine machen das möglich:
+
+- **Namespaces** — isolieren was ein Prozess sehen kann (Prozesse, Netzwerk, Dateisystem)
+- **cgroups** — begrenzen was ein Prozess verbrauchen darf (CPU, RAM, IO)
+- **overlayfs** — ermöglichen schichtweise Images ohne Dateiduplizierung
+
+Ein `docker run`-Befehl erstellt letztendlich einen Linux-Prozess mit diesen drei 
+Einschränkungen. Genau das werden wir in diesem Tutorial selbst nachbauen.
+
+## Vorbereitung
 Das Tutorial machen wir innerhalb eines Docker Containers um unseren Host nicht zu beeinträchtigen. Der Container muss im `--privileged` mode laufen, damit wir die kernel Aufrufe ausführen können.
 ```bash
 docker run -it --privileged ubuntu:24.04 /bin/bash
 ```
-#### Terminal färben
-Da wir innerhalb mehrerer Terminal instanzen arbeiten werden, werden wir den Prompt String des Terminals umbenennen und färben. Dies geschieht mit folgenden Befehlen, die führen wir beim betreten des entsprechenden Terminals aus.
+Ihr könnt das Tutorial auch in einer Linux VM bearbeiten.
+
+### Terminal färben
+Da wir innerhalb mehrerer Terminal Instanzen arbeiten werden, werden wir den Prompt String des Terminals umbenennen und färben. Dies geschieht mit folgenden Befehlen, die führen wir beim betreten des entsprechenden Terminals aus.
 
 ```bash
 # Terminal 1 — immer der "Host"
@@ -26,7 +87,7 @@ export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
 # Terminal 2 — immer der "Container/Namespace"
 export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
 ```
-#### Platzhalterprozesse
+### Platzhalterprozesse
 Um die Isolation besser zu verdeutlichen werden wir zusätzliche Prozesse im Host starten.
 ```bash
 sleep 1000 &
@@ -36,7 +97,7 @@ cat /dev/zero > /dev/null &
 yes > /dev/null &
 ```
 
-#### Prozesse beenden
+### Prozesse beenden
 Diese können wir mit folgenden befehlen beenden.
 ```bash
 jobs
@@ -50,9 +111,23 @@ sudo kill -9 <pid>
 Es gibt folgende Signale SIGTERM | -15 (Bitte beende dich) und SIGKILL | -9 (Sofort beenden) . 
 
 
-### 0.1 GO Installation
+### Docker Container
+Ich empfehle dieses Tutorial in einem Container oder einer VM zu machen. Sonst könnte man sich sein OS kaputt machen.  
+Meine empfehlung ist das [Image](./DOcker/Dockerfile) zu verwenden weil dieser bereits die wichtigsten Tools vorinstalliert hat.
+```bash
+#baut das image
+docker build -f ./Docker/Dockerfile --label cdev -t developer-image/ubuntu:cdev .
 
-## 1. Namespaces - Isolation
+#startet den container
+docker run -i --rm --privileged --name cdev -t developer-image/ubuntu:cdev
+
+#gibt die laufenden container aus
+docker ps 
+#startet ein neues Terminal im container
+docker exec -it <container-name> bash 
+```
+
+## Namespaces - Isolation
 Wir verbinden uns mit unserem Docker Container und [färben](#terminal-färben) diesen erstmal als HOST um die Übersicht besser zu gestalten.
 Danach starten wir erstmal ein Paar [Platzhalterprozesse](#platzhalterprozesse).
 Nun listen wir unsere Prozesse auf mit `ps awx`. Wir sollten mehrere Prozesse angezeigt bekommen.
@@ -78,10 +153,10 @@ bash(1)-+-cat(19)
         |-sleep(18)
 ```
 
-### 1.1 PID eigener Prozessbaum
+### PID eigener Prozessbaum
 Alle unsere Prozesse sind aktuell von unserer bash abhängig, das heißt sie hat diese Prozesse gestartet.
 Nun erstellen wir unseren ersten Teil der Isolation.
-Dafür verwenden wir den `UNSHARE` Befehl.
+Dafür verwenden wir den [unshare](https://www.kernel.org/doc/Documentation/unshare.txt) Befehl.
 ```bash
 sudo unshare --pid --fork --mount-proc /bin/bash
 ```
@@ -136,7 +211,7 @@ root@f805d9b6708b:/home/developer/source-code# exit
 exit
 [HOST]
 ```
-Wir sind im `CONTAINER`. Können wegen einem Fehler keine eigenen Prozesse ausführen. Dies kommt daher das wir den Prozess zwar isoliert haben aber weder ein `fork` noch ein `--mount-proc` gemacht haben. Die PID des neuen `bash` Prozesses ist nicht 1 sondern 721. Das heist das unsere bash noch immer im Namespace des `HOSTS` lauft. Das ist auch der Grund warum wir keine eigenen Prozesse starten können. Fork sorgt dafür das die Anwendung die wir mit `unshare` in einen eigenen Namespace verschieben, dort neu gestartet wird. Da dies nicht geschehen nicht, können wir auch nichts starten. Wir verlassen die `namespace` mit `exit`.
+Wir sind im `CONTAINER`. Können wegen einem Fehler keine eigenen Prozesse ausführen. Dies kommt daher das wir den Prozess zwar isoliert haben aber weder ein `fork` noch ein `--mount-proc` gemacht haben. Die PID des neuen `bash` Prozesses ist nicht 1 sondern 721. Das heist das unsere bash noch immer im Namespace des `HOSTS` lauft. Das ist auch der Grund warum wir keine eigenen Prozesse starten können. Fork sorgt dafür das die Anwendung die wir mit `unshare` in einen eigenen Namespace verschieben, dort neu gestartet wird. Da dies nicht geschehen ist, können wir auch nichts starten. Wir verlassen die `namespace` mit `exit`.
 
 Lasst uns den `fork` Befehl hinzu nehmen `sudo unshare --pid --fork /bin/bash` und erneut die eigene PID sowie die laufenden Prozesse ausgeben. Was seht ihr jetzt? Wie unterscheidet sich die Ausgabe zu den vorherigen Aufrufen?
 
@@ -154,7 +229,7 @@ root       737  0.0  0.0   6444  2456 pts/1    R+   21:11   0:00 ps aux
 root@f805d9b6708b:/home/developer/source-code#  echo $$
 1
 ```
-Das sieht schon besser aus. Wir sehen das unsere PID jetzt 1 ist, können aber noch weiterhin die Prozesse des hosts sehen. Warum? Wir haben das `/proc` Verzeichniss nicht neu gemountet. Linux arbeitet sehr stark mit Dateien und unsere laufenden Prozesse sind Dateien im `/proc` Verzeichnis auf dem RAM. Lasst uns jetzt das `/proc` Verzeichnis mounten und dadurch das Verzeichnis des `HOST` verdecken. Führen wir den Befehl aus `mount -t proc proc /proc` und zeigen dann die laufenden Prozesse an. Was seht ihr jetzt?
+Das sieht schon besser aus. Wir sehen das unsere PID jetzt 1 ist, können aber noch weiterhin die Prozesse des hosts sehen. Warum? Wir haben das `/proc` Verzeichniss nicht neu gemountet. Linux arbeitet sehr stark mit Dateien und unsere laufenden Prozesse sind Dateien im `/proc` Verzeichnis auf dem RAM. Lasst uns jetzt das `proc` Dateisystem mounten und dadurch das `/proc` Verzeichnis des `HOST` verdecken. Führen wir den Befehl aus `mount -t proc proc /proc` und zeigen dann die laufenden Prozesse an. Was seht ihr jetzt?
 
 ```bash
 root@f805d9b6708b:/home/developer/source-code# mount -t proc proc /proc
@@ -168,12 +243,172 @@ Jetzt sieht es richtig aus, wir sehen nur noch unsere bash mit der PID 1 und ps.
 Zusammengefasst erstellt `sudo unshare --pid --fork --mount-proc /bin/bash` einen neuen `namespace`, startet die `/bin/bash` in diesem `namespace` neu und überdeckt das `/proc` Verzeichnis damit man aus dem Namespace nicht mehr die `HOST` Prozesse einsehen kann. Der Kernel befüllt dieses Verzeichnis automatisch, wir müssen es nur mounten.
 Mounten wird in den nächsten Schritten immer wieder verwendet um bestimmte Verzeichnisse zu verbergen und mit den Dateien die der Container benötigt zu füllen.
 
-### 1.2 NET eigenes Netztwerkinterfrace
 
-#### Einleitung
+
+## MNT eigenes Dateisystem
+
+### Einleitung
+Linux repräsentiert alles als Dateien. Dazu gehören Prozesse (`/proc`), Geräte (`/dev`), Netzwerk (`/sys/net`) und das eigentliche Dateisystem. Der `MNT`-Namespace isoliert die *Mounttabelle*, die liste aller eingehängten Dateisysteme. Dadurch hat ein Prozess seine eigene Private Tabelle. 
+Ein Container soll sein eigenes Root-Verzeichnis `/` haben.
+Dafür verwenden wir zwei Werkzeuge: `chroot` (tauscht das Root-Verzeichnis) und
+`unshare --mount` (isoliert Mounts damit sie den Host nicht beeinflussen).
+
+### Was ist ein Mount
+Linux arbeitet mit einem einzigen Verzeichnisbaum, deswegen müssen zusätzliche Dateisysteme wie z.B.: USB Massenspeicher an diesen Baum angehängt werden. Das nennt man Mounten. 
+
+Der Baum beginnt bei `/`. Hier ist ein typischer Linux Baum.
+```
+/
+├── bin/
+├── home/
+├── proc/
+├── dev/
+└── mnt/
+```
+
+Gemacht wird das mit dem Befehl `mount <was> <wo>`. EIn USB Massenspeicher würde man so mounten `mount /dev/sdb1 /mnt/usb`. Dabei ist das Verzechnis `/mnt/usb` der Mountpunkt an den das Gerät `/dev/sdb1` gehängt wird.
+
+Weiterhin gibt es virtuelle Dateisysteme, wie z.B.: `/proc` dieses wird vom Kernel im RAM, live und dynamisch generiert. Es enthällt die aktuell laufenden Prozesse. Diese habt ihr im vorherigen Kapitel gesehen `mount -t proc proc /proc`. Hier wurde das Virtuelle `proc`-Dateisystem bei `/proc` im Baum gehängt, das Dateisystem hat den Typen `-t proc`. Danach bfüllt der Kernel es automatisch.
+
+### chroot der Blickwinkel eines Prozesses
+
+Jezt geht es darum dafür zu sorgen das unser Prozess nicht nur die entsprechenden virtuellen Dateisysteme gemountet hat, sondern auch um den Blickwinkel. Wir wollen dafür sorgen das der Prozess sich in einem eigenen Linux Baum bewegt. Weiterhin soll der Prozess nicht in der Lage sein den Baum des Hosts zu betreten. Dies erreichen wir mit `chroot <new_root> [command]`.
+
+Dies sorgt dafür das die ausgeführte Command in dem neuen Verzeichniss ausgeführt wird.
+
+Wenn wir `chroot /home/new/root /bin/bash` ausführen würde es den Blickwinckel der Bash Anwendung von
+```
+/
+├── bin/
+├── home/
+|    └── new/root
+├── proc/
+├── dev/
+└── mnt/
+```
+nach `new/root/...` umbiegen wobei dieses Verzeichnis von jetzt an als `/` definiert ist und der Prozess die oberen Verzeichnisse nicht mehr erreichen kann.
+
+### Alles zusammenführen
+
+Jetzt führen wir das was wir in dem Abschnitt gelernt haben zusammen.
+Dafür benötigen wir erstmal eine weitere Linux Distribution. Wir verwenden Alpine. Diese wird für unseren Container als der Root definiert.
+
+Als erstes gehen wir zurück in unseren Docker Container den wir für die Aufgaben verwendet haben und machen zwei Terminals auf. Ein Terminal wird der Host sein und einen machen wir zum Container.
+```bash
+#Terminal 1 -> wird unser Host sein
+docker run -i --rm --name cdev --privileged -t <image>
+export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
+#Terminal 2 -> wird unser Container 1 sein
+docker exec -it <container> bash 
+export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
+```
+ Wir betreten den zweiten Terminal und führen die nachfolgenden Befehle darin aus.
+Wir laden es mit `wget` herunter und extrahieren den Inhalt des TARs in `/tmp/alpine`. Dies wird unser neuer root sein.
+```sh
+wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz
+mkdir -p /tmp/alpine
+tar xf alpine-minirootfs-*.tar.gz -C /tmp/alpine
+ls /tmp/alpine 
+```
+Als nächstes starten wir die bash im eigenen `--mount` Namespace mit unshare und benennen diese als `CONTAINER`.
+```bash
+sudo unshare --mount /bin/bash
+export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
+```
+Jetzt mounten wir drei Dateisysteme in unserem neuen Root. `proc` für die laufenden Prozesse und `sysfs` für Systemdienste die Linux benötigt. Die letzte Zeile bindet die Geräte die mit dem Host verbunden sind und sich standartmäßig in `/dev` befinden an den `/tmp/alpine/dev` Zweig ohne ein neues Dateisystem zu erstellen. Wir spiegeln sie sozusagen. 
+```sh
+mount -t proc proc /tmp/alpine/proc
+mount -t sysfs sysfs /tmp/alpine/sys
+mount -o bind /dev /tmp/alpine/dev
+```
+
+Jetzt müssen wir nur noch den neuen Root für die Shell des Containers definieren.
+```sh
+chroot /tmp/alpine /bin/sh
+```
+Jetzt sind wir mit der Shell im `alpine` Verzeichniss und sehen nur noch was unten drunter ist aber können nicht mehr raus.
+
+Lasst uns testen ob es funktioniert hat.
+```sh
+cat /etc/os-release   # Alpine Linux
+ls /proc              # Prozesse sichtbar
+ps aux               # laufende Prozesse
+echo "geheim" > /secret.txt  # Datei nur im Container
+exit                  # zurück in unshare-Shell
+```
+
+Jetzt nur noch aufraumen.
+```sh
+umount /tmp/alpine/proc
+umount /tmp/alpine/sys
+umount /tmp/alpine/dev
+exit   # Mount-Namespace verlassen — Mounts verschwinden automatisch
+```
+
+Damit haben wir ein eigenes Dateisystem für unseren Container erstellt und es isoliert.
+
+## overlayfs Dateisystem in Schichten
+
+Unser Dateisystem hat ein großes Problem. Es wird beim Erstellen des Containers verändert und muss bei jedem neuen Container neu heruntergeladen werden. Dies ist umständlich und verbraucht viel Speicher. Das geht besser mit `overlayfs`
+
+Wir benötigen erstmal vier Verzeichnisse und unsere `alpine` image die wir direkt in den `alpine/diff` Verzeichnis exportieren.
+```sh
+mkdir -p /tmp/containers/alpine/diff
+mkdir -p /tmp/containers/c1/upper
+mkdir -p /tmp/containers/c1/work
+mkdir -p /tmp/containers/c1/merged
+
+tar xf alpine-minirootfs-*.tar.gz -C /tmp/containers/alpine/diff
+```
+
+`overlayfs` ist Teil des Linux Kernels und ermöglicht es uns ein Verzeichnis als `lower` zu definieren. Dies sorgt dafür das dieses Verzeichnis `readonly` wird. 
+
+Dann geben wir noch drei weitere Verzeichnisse an `upper`, `work` und `merged`.  
+Wenn wir eine neue Datei in `lower` erstellen, dann wird diese stattdessen automatisch in `upper` abgelegt. Wenn wir eine Datei löschen dann wird in `upper` eine `whiteout` Datei erstellt, die die Originaldatei in `lower` versteckt.  
+`work` ist für uns egal, `overlayfs` verwendet es für Laufzeitdaten.  
+`merged` ist das Verzeichnis das wir mit `chroot` mounten müssen, dies ist die Gesamtansicht für unseren Container.
+
+Also mounten wir jetzt unser Container Dateisystem.
+```sh
+mount -t overlay overlay \
+  -o lowerdir=/containers/alpine/diff,\
+     upperdir=/containers/c1/upper,\
+     workdir=/containers/c1/work \
+  /containers/c1/merged
+```
+
+### Tests des Dateisystems
+Lasst es uns jetzt ausprobieren. Wir ändern eine Datei in unserem Container und schauen dann nach ob diese sich im `lower` verändert hat. Dies sollte nicht passieren, es sollte eine neue Datei im `upper` entstanden sein
+```sh
+# Datei im Container ändern
+echo "verändert" > /tmp/containers/c1/merged/etc/hostname
+
+# lower ist unberührt
+cat /tmp/containers/alpine/diff/etc/hostname   # original
+
+# Änderung nur im upper
+cat /tmp/containers/c1/upper/etc/hostname      # "verändert"
+ls /tmp/containers/c1/upper/etc/               # nur geänderte Dateien
+```
+Lasst uns einen weiteren Container anlegen. `C1` und `C2` teilen sich jetzt den selben `lower` und haben eigene Verzeichnisse für die Änderungen.
+```sh
+mkdir -p /tmp/containers/c2/upper /tmp/containers/c2/work /tmp/containers/c2/merged
+
+mount -t overlay overlay \
+  -o lowerdir=/tmp/containers/alpine/diff,\
+     upperdir=/tmp/containers/c2/upper,\
+     workdir=/tmp/containers/c2/work \
+  /tmp/containers/c2/merged
+```
+
+Zuletzt müsste man noch `unshare` und `chroot` in den entsprechenden `merged` machen und man hat ein eigenes Container Dateisystem das die originale Image nicht mehr verändert. Docker macht es genauso, nur das es anstatt `c1`, hashwerte als Containernamen und `overlayfs` Verzeichnisse verwendet.
+
+## NET eigenes Netztwerkinterfrace
+
+### Einleitung
 In diesem Teil werden wir uns mit Netzwerken beschäftigen. Wir werden lernen wie man eine Verbindung zwischen dem Container und Host herstellt über die beide mit einander kommunizieren können. Danach konfigurieren wir unser Netzwerk so das auch das Internet von innerhalb des Containers erreichbar ist. Zuletzt erstellen wir eine Bridge über die Container miteinander, mit dem Host und dem Internet kommunizieren können.
 
-#### Vorbereitung
+### Vorbereitung
 Beendet und löscht den Docker Container in dem ihr die vorherigen Aufgaben bearbeitet habt. Dadurch raumen wir alles auf und können für die nächsten Aufgaben auf einer sauberen Umgebung starten.
 
 Startet den Docker Container neu und verbintet zwei weitere Terminals, damit wir drei Terminals innerhalb des Containers haben.
@@ -193,7 +428,7 @@ export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
 Wir färben erstmal alle drei Terminals als HOST, und werden später dann den `unshare` machen.
 Wenn nicht anders genannt arbeiten wir in `Terminal 1`
 
-#### Das Netz
+### Das Netz
 Zuerst lassen wir uns die aktuellen Netzwerkschnittstellen unseres HOSTs an.
 ```bash
 ip -brief addr show
@@ -217,7 +452,7 @@ Die meisten Interfaces werden vom Kernel automatisch erstellt und können ignori
 Dabei bedeutet `eth0@if25` das es teil eines Paares ist. Das Interface `eth0` hat das Gegenstück mit der ID `25` in möglicherweise einem anderen Namespace. In dem Fall dem HOST unseres aktuellen Docker Containers.
 Die IDs können wir mit `ip link show` sehen.
 
-#### Erstellen eines Interfaces
+### Erstellen eines Interfaces
 Lasst uns die Anzahl der Interfaces zählen `ip -brief link show | wc -l ` merkt euch die Zahl.
 
 Jetzt erstellen wir ein neues Interface vom Typ `veth` (virtual-ether) mit dem Namen `veth0` und dem Gegenstück dessen Name `veth1` ist. Also ein Kabel mit zwei Steckern.
@@ -253,7 +488,7 @@ ip -brief link show
 ```
 Warum ist `veth1` auch weg?
 
-#### Namespace erstellen und Link verschieben
+### Namespace erstellen und Link verschieben
 Wir wechseln jetzt in `Terminal 2` und führen `sudo unshare --net /bin/bash` aus, dadurch wechseln wir aus dem `HOST` in ein eigenes Namespace. Wir [färben](#terminal-färben) es direkt ein um es unterscheiden zu können. Dann geben wir die PID `echo $$` des Prozesses aus.
 
 ```bash
@@ -279,7 +514,7 @@ sudo ip link set veth1 netns 531
 Führt `ip -brief link show` im `HOST` aus, `veth1` sollte verschwunden sein. Wechselt in den `CONTAINER-1` und führt den Befehl erneut aus, ihr solltet jetzt `veth1` dort sehen.
 Somit haben wir unseren `HOST` mit unserem `CONTAINER-1` mit einem `Kabel` verbunden.
 
-#### Verbindung aufbauen und testen
+### Verbindung aufbauen und testen
 Was wir jetzt noch machen müssen ist den zwei Enden je eine IP zuzuweisen. Wir nehmen das `10.0.0.0/24` Netz.
 Im `HOST` führen wir folgende Befehle aus.
 ```bash
@@ -354,7 +589,7 @@ listening on veth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
 ```
 Wir sehen wie die Pakete hin und her geschickt werden.
 
-#### Mehrere Container über Bridge verbinden
+### Mehrere Container über Bridge verbinden
 In diesem Schritt werden wir ein Bridge Netzwerk erstellen, genau so wie es auch Docker normalerweise aufbaut damit die Container untereinander kommunizieren können.
 
 Dazu wechseln wir jetzt in den bisher ungenutzten `Terminal-3` und verschieben den in ein neues `namespace`, [färben](#terminal-färben) den Terminal und nennen ihn `CONTAINER-2`. Geben uns die PID aus und merken uns diese.
@@ -416,5 +651,36 @@ ip link set veth-c2 up
 ip link set lo up
 ```
 
-Jetzt sollte alles konfiguriert sein. Testet ob die Pings funktionierten von den zwei Containern zu einander und zum Host sowie inst Internet.
-Wenn alles funktioniert haben wir ein Bridge Netzwerk gebaut das auch Docker normallerweise für seine Container verwendet.
+Jetzt sollte alles konfiguriert sein. Testet ob die Pings funktionierten von den zwei Containern zu einander und zum Host sowie inst Internet. Wenn alles funktioniert haben wir ein Bridge Netzwerk gebaut das auch Docker normallerweise für seine Container verwendet.
+
+
+## UTS eigener Hostname
+```sh
+ unshare --uts /bin/bash → hostname setzen → HOST sieht alten Namen
+```
+
+### USER Namespace - rootless Container  
+
+```sh
+unshare --user --map-root-user /bin/bash
+whoami → root (im Container)
+cat /proc/self/uid_map → zeigt die Mapping-Tabelle
+```
+
+## IPC Namespace - Shared Memory Isolation
+#### ipcmk + ipcs Demo
+
+## cgroups - Ressourcenlimits 
+### CPU, RAM, IO Grenzen
+
+
+## Quellen
+
+- https://www.kernel.org
+- https://www.kernel.org/doc/Documentation/unshare.txt
+- https://www.kernel.org/doc/Documentation/filesystems/proc.txt
+- https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md#namespaces
+- https://manpages.ubuntu.com/manpages/jammy/de/man1/unshare.1.html
+- https://manpages.ubuntu.com/manpages/stonking/man8/ip-route.8.html
+- https://manpages.ubuntu.com/manpages/stonking/man1/chroot.1.html
+
