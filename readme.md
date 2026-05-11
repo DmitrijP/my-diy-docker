@@ -2,7 +2,6 @@
 
 - [DIY Docker Engine Tutorial](#diy-docker-engine-tutorial)
   - [Einleitung](#einleitung)
-  - [Table of contents](#table-of-contents)
   - [Voraussetzungen](#voraussetzungen)
   - [Was ist Docker](#was-ist-docker)
   - [Vorbereitung](#vorbereitung)
@@ -47,9 +46,6 @@ versteht Docker.
 Wir arbeiten in zwei Phasen:
 1. **Linux-Hands-on** - jedes Primitive einzeln in der Shell ausprobieren
 2. **Go-Implementierung** - alle Teile zu einer eigenen Container-Runtime zusammenbauen
-
-## Table of contents
-
 
 ## Voraussetzungen
 - eine VM oder Docker
@@ -655,9 +651,41 @@ Jetzt sollte alles konfiguriert sein. Testet ob die Pings funktionierten von den
 
 
 ## UTS eigener Hostname
+Der `UTS`-Namespace (Unix Time-Sharing) isoliert den **Hostnamen** des Systems.
+Ohne ihn sehen alle Container denselben Hostnamen des Hosts. Das macht Logs unlesbar
+und Anwendungen die sich mit dem Hostnamen im Netzwerk registrieren (z.B. Datenbanken)
+würden sich gegenseitig überschreiben.
+
+`docker run --name myapp nginx` setzt intern den UTS-Hostnamen auf `myapp`.
+Jedes `[myapp] ERROR` im Log ist damit sofort dem richtigen Container zuzuordnen.
+
+Wir starten zwei Terminals und färben diese als `HOST` und `CONTAINER`.
+Im `HOST` schauen wir uns erstmal den aktuellen Hostnamen an.
+
 ```sh
- unshare --uts /bin/bash → hostname setzen → HOST sieht alten Namen
+[HOST] $ hostname
+ubuntu
 ```
+Dann wechseln wir in den CONTAINER Terminal und erstellen einen UTS-Namespace.
+```sh
+sudo unshare --uts /bin/bash
+export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
+```
+Jetzt setzen wir einen eigenen Hostnamen im Container und überprüfen ihn.
+```sh
+[CONTAINER] $ hostname mycontainer
+[CONTAINER] $ hostname
+mycontainer
+```
+Wechseln wir zurück in den HOST und prüfen ob sich etwas verändert hat.
+
+```sh
+[HOST] $ hostname
+ubuntu
+```
+Der Hostname des Hosts ist unverändert. Der Container hat seinen eigenen Hostnamen
+der nach außen nicht sichtbar ist. Mit `exit` verlassen wir den Namespace wieder.
+
 
 ### USER Namespace - rootless Container  
 
