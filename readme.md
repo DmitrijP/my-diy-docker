@@ -18,7 +18,7 @@
     - [Alles zusammenführen](#alles-zusammenführen)
   - [overlayfs Dateisystem in Schichten](#overlayfs-dateisystem-in-schichten)
     - [Tests des Dateisystems](#tests-des-dateisystems)
-  - [NET eigenes Netztwerkinterfrace](#net-eigenes-netztwerkinterfrace)
+  - [NET eigenes Netztwerkinterface](#net-eigenes-netztwerkinterface)
     - [Einleitung](#einleitung-2)
     - [Vorbereitung](#vorbereitung-1)
     - [Das Netz](#das-netz)
@@ -26,12 +26,16 @@
     - [Namespace erstellen und Link verschieben](#namespace-erstellen-und-link-verschieben)
     - [Verbindung aufbauen und testen](#verbindung-aufbauen-und-testen)
     - [Mehrere Container über Bridge verbinden](#mehrere-container-über-bridge-verbinden)
+    - [Aufräumen](#aufräumen)
   - [UTS eigener Hostname](#uts-eigener-hostname)
     - [USER Namespace - rootless Container](#user-namespace---rootless-container)
-  - [IPC Namespace - Shared Memory Isolation](#ipc-namespace---shared-memory-isolation)
-      - [ipcmk + ipcs Demo](#ipcmk--ipcs-demo)
   - [cgroups - Ressourcenlimits](#cgroups---ressourcenlimits)
-    - [CPU, RAM, IO Grenzen](#cpu-ram-io-grenzen)
+    - [Docker Container Konfiguration](#docker-container-konfiguration)
+    - [Shell in Leaf-cgroup verschieben](#shell-in-leaf-cgroup-verschieben)
+    - [Limits für unseren Container definieren](#limits-für-unseren-container-definieren)
+    - [Limits testen](#limits-testen)
+    - [Aufräumen](#aufräumen-1)
+  - [IPC Namespace - Shared Memory Isolation](#ipc-namespace---shared-memory-isolation)
   - [Quellen](#quellen)
 
 
@@ -43,25 +47,27 @@ Docker ist kein Magie - es sind Linux-Kernel-Features: Namespaces für Isolation
 cgroups für Ressourcenlimits und overlayfs für Images. Wer diese Primitives versteht,
 versteht Docker.
 
-Wir arbeiten in zwei Phasen:
-1. **Linux-Hands-on** - jedes Primitive einzeln in der Shell ausprobieren
-2. **Go-Implementierung** - alle Teile zu einer eigenen Container-Runtime zusammenbauen
 
 ## Voraussetzungen
 - eine VM oder Docker
 - einfache Dockerkentnisse
 - einfache Linuxkentnisse
 - einfache Netzwerkkentnisse
-- eine Programmiersprache, am besten GO
 
 ## Was ist Docker
 
 Docker ist eine Container-Runtime die auf Linux-Kernel-Features aufbaut, um Prozesse 
 zu isolieren und zu verwalten. Drei Bausteine machen das möglich:
 
-- **Namespaces** — isolieren was ein Prozess sehen kann (Prozesse, Netzwerk, Dateisystem)
-- **cgroups** — begrenzen was ein Prozess verbrauchen darf (CPU, RAM, IO)
-- **overlayfs** — ermöglichen schichtweise Images ohne Dateiduplizierung
+- **Namespaces** - isolieren was ein Prozess sehen kann (Prozesse, Netzwerk, Dateisystem)
+  - **pid** - Prozessisolation
+  - **mount** - einhängen von Dateisystemen in einen isolierten Verzeichnisbaum
+  - **net** - ermöglichen die Netzwerkkommunikation zwischen den Containern und dem Host
+  - **user** - Isoliert die Benutzer
+  - **uts** - Unix Time Sharing Isolation des Hostnamens
+  - **ipc** - shared memory Isolation
+- **overlayfs** - ermöglichen schichtweise Images ohne Dateiduplizierung
+- **cgroups** - begrenzen was ein Prozess verbrauchen darf (CPU, RAM, IO)
 
 Ein `docker run`-Befehl erstellt letztendlich einen Linux-Prozess mit diesen drei 
 Einschränkungen. Genau das werden wir in diesem Tutorial selbst nachbauen.
@@ -77,10 +83,10 @@ Ihr könnt das Tutorial auch in einer Linux VM bearbeiten.
 Da wir innerhalb mehrerer Terminal Instanzen arbeiten werden, werden wir den Prompt String des Terminals umbenennen und färben. Dies geschieht mit folgenden Befehlen, die führen wir beim betreten des entsprechenden Terminals aus.
 
 ```bash
-# Terminal 1 — immer der "Host"
+# Terminal 1 - immer der "Host"
 export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
 
-# Terminal 2 — immer der "Container/Namespace"
+# Terminal 2 - immer der "Container/Namespace"
 export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
 ```
 ### Platzhalterprozesse
@@ -338,7 +344,7 @@ Jetzt nur noch aufraumen.
 umount /tmp/alpine/proc
 umount /tmp/alpine/sys
 umount /tmp/alpine/dev
-exit   # Mount-Namespace verlassen — Mounts verschwinden automatisch
+exit   # Mount-Namespace verlassen - Mounts verschwinden automatisch
 ```
 
 Damit haben wir ein eigenes Dateisystem für unseren Container erstellt und es isoliert.
@@ -367,10 +373,10 @@ Wenn wir eine neue Datei in `lower` erstellen, dann wird diese stattdessen autom
 Also mounten wir jetzt unser Container Dateisystem.
 ```sh
 mount -t overlay overlay \
-  -o lowerdir=/containers/alpine/diff,\
-     upperdir=/containers/c1/upper,\
-     workdir=/containers/c1/work \
-  /containers/c1/merged
+  -o lowerdir=/tmp/containers/alpine/diff,\
+     upperdir=/tmp/containers/c1/upper,\
+     workdir=/tmp/containers/c1/work \
+  /tmp/containers/c1/merged
 ```
 
 ### Tests des Dateisystems
@@ -399,7 +405,7 @@ mount -t overlay overlay \
 
 Zuletzt müsste man noch `unshare` und `chroot` in den entsprechenden `merged` machen und man hat ein eigenes Container Dateisystem das die originale Image nicht mehr verändert. Docker macht es genauso, nur das es anstatt `c1`, hashwerte als Containernamen und `overlayfs` Verzeichnisse verwendet.
 
-## NET eigenes Netztwerkinterfrace
+## NET eigenes Netztwerkinterface
 
 ### Einleitung
 In diesem Teil werden wir uns mit Netzwerken beschäftigen. Wir werden lernen wie man eine Verbindung zwischen dem Container und Host herstellt über die beide mit einander kommunizieren können. Danach konfigurieren wir unser Netzwerk so das auch das Internet von innerhalb des Containers erreichbar ist. Zuletzt erstellen wir eine Bridge über die Container miteinander, mit dem Host und dem Internet kommunizieren können.
@@ -649,14 +655,28 @@ ip link set lo up
 
 Jetzt sollte alles konfiguriert sein. Testet ob die Pings funktionierten von den zwei Containern zu einander und zum Host sowie inst Internet. Wenn alles funktioniert haben wir ein Bridge Netzwerk gebaut das auch Docker normallerweise für seine Container verwendet.
 
+### Aufräumen
+Wir verlassen die zwei Container Terminals mit exit. Dadurch werden die veth Interfaces in den Namespaces automatisch vom Kernel entfernt, da der Namespace nicht mehr existiert.
+
+Zurück im HOST löschen wir die Bridge und entfernen die iptables Regel.
+```sh
+sudo ip link delete docker-bridge
+sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -j MASQUERADE
+```
+Prüfen ob alles sauber ist.
+```sh
+ip -brief link show           # docker-bridge und veth Interfaces sollten weg sein
+sudo iptables -t nat -L POSTROUTING --line-numbers   # Regel sollte nicht mehr auftauchen
+```
+
 
 ## UTS eigener Hostname
-Der `UTS`-Namespace (Unix Time-Sharing) isoliert den **Hostnamen** des Systems.
+Der `UTS` Namespace (Unix Time-Sharing) isoliert den **Hostnamen** des Systems.
 Ohne ihn sehen alle Container denselben Hostnamen des Hosts. Das macht Logs unlesbar
 und Anwendungen die sich mit dem Hostnamen im Netzwerk registrieren (z.B. Datenbanken)
 würden sich gegenseitig überschreiben.
 
-`docker run --name myapp nginx` setzt intern den UTS-Hostnamen auf `myapp`.
+`docker run --name myapp nginx` setzt intern den UTS Hostnamen auf `myapp`.
 Jedes `[myapp] ERROR` im Log ist damit sofort dem richtigen Container zuzuordnen.
 
 Wir starten zwei Terminals und färben diese als `HOST` und `CONTAINER`.
@@ -689,17 +709,221 @@ der nach außen nicht sichtbar ist. Mit `exit` verlassen wir den Namespace wiede
 
 ### USER Namespace - rootless Container  
 
+Der `USER` Namespace isoliert die Benutzer- und Gruppen-IDs eines Prozesses. Ohne ihn läuft ein Container-Prozess der root sein will als echter root auf dem Host. Ein Container-Ausbruch würde sofort volle Host-Root-Rechte geben. Ein Sicherheitsproblem.
+
+Mit dem `USER` Namespace wird eine UID-Mapping Tabelle angelegt. Ein Prozess ist innerhalb des Containers `root` (UID 0), auf dem Host aber nur ein unprivilegierter Nutzer. Das ist die Grundlage von rootless Containern. `docker run --user` und der rootless Docker Modus bauen genau darauf auf.
+
+Wir starten zwei Terminals und färben diese als `HOST` und `CONTAINER`.
+Im `HOST` schauen wir uns erstmal unseren aktuellen Benutzer an.
+```sh
+[HOST] $ id
+uid=1000(developer) gid=1000(developer) groups=1000(developer)
+```
+Dann wechseln wir in den `CONTAINER` Terminal. Diesmal brauchen wir kein sudo, das ist der Punkt des USER Namespace, er ist der einzige Namespace den unprivilegierte Nutzer ohne root-Rechte erstellen dürfen.
 ```sh
 unshare --user --map-root-user /bin/bash
-whoami → root (im Container)
-cat /proc/self/uid_map → zeigt die Mapping-Tabelle
+export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
 ```
+Jetzt prüfen wir wer wir innerhalb des Containers sind.
+```sh
+[CONTAINER] $ whoami
+root
+[CONTAINER] $ id
+uid=0(root) gid=0(root) groups=0(root)
+```
+Wir sind root. Lasst uns die UID-Mapping Tabelle anschauen die der Kernel für uns angelegt hat.
+```sh
+[CONTAINER] $ cat /proc/self/uid_map
+         0       1000          1
+```
+Die drei Spalten bedeuten: UID 0 im Container entspricht UID 1000 auf dem Host, und das gilt für 1 Benutzer. Unser Container-root ist auf dem Host also nur der developer Benutzer.
+Wechseln wir zurück in den HOST und schauen wie der Prozess von außen aussieht.
 
-## IPC Namespace - Shared Memory Isolation
-#### ipcmk + ipcs Demo
+```sh
+[HOST] $ ps aux | grep bash
+develop+  1423  0.0  0.0   4144  3328 pts/1    S    21:00   0:00 /bin/bash
+```
+Der Prozess gehört dem developer Benutzer, nicht root. Erstellen wir eine Datei im Container und prüfen wie diese auf dem Host aussieht.
+```sh
+[CONTAINER] $ echo "geheim" > /tmp/container-datei.txt
+```
+Im HOST.
+```sh
+[HOST] $ ls -la /tmp/container-datei.txt
+-rw-r--r-- 1 developer developer 7 Mai 18 21:01 /tmp/container-datei.txt
+```
+Die Datei gehört dem developer Benutzer, nicht root. Egal was wir innerhalb des Containers als root machen, auf dem Host bleiben wir ein unprivilegierter Benutzer.
+
+Mit exit verlassen wir den Namespace wieder.
+
+In diesem Tutorial verwenden wir `--privileged` für unseren Docker Container, da die anderen Demos wie `mount, cgroups oder veth` echte Kernel-Privilegien auf dem Host benötigen. Der `USER` Namespace alleine reicht dafür nicht aus. Er schützt die BenutzerIDs, ersetzt aber keine echten `root` Rechte für Kernel-Features.
+
 
 ## cgroups - Ressourcenlimits 
-### CPU, RAM, IO Grenzen
+[`cgroups`](https://manpages.ubuntu.com/manpages/bionic/man7/cgroups.7.html) sind ein Linux Kernel Feature das Ressourcenlimits für Prozesse und deren Kindprozesse erzwingt. Während Namespaces isolieren was Prozesse sehen, begrenzen `cgroups` was dieser verbrauchen darf.
+Da Linux alles in Dateien verwaltet, ist ein `cgroup` einfach ein Verzeichnis `/sys/fs/cgroup/` mit dateien in denen Limits definiert werden.
+Mit `ls /sys/fs/cgroup/` könnt ihr die Limits anschauen und mit `mount | grep cgroup` die Version. Wir verwenden `V2` für unser Tutorial.
+
+### Docker Container Konfiguration 
+Damit wir das innerhalb unseres dev Containers nutzen können, müssen wir diesen mit dem Flag `--cgroupns=host` starten. Wenn ihr das Tutorial in einer Linux VM macht dann ist dies nicht nötig.  
+
+Durch das Flag leiten wir die `cgroups` des Hostsystems an den `DEV Container` weiter. Sonst können wir die `cgroup` innerhalb des Containers nicht verändern.
+
+```sh
+docker run -i --rm --privileged --cgroupns=host --name cdev -t developer-image/ubuntu:cdev
+export PS1="\[\e[32m\][HOST]\[\e[0m\] \$ "
+```
+
+Wir testen ob es funktioniert hat. Es sollte ein Verzeichnis innerhalb des Docker Hosts ausgegeben werden.
+```sh
+[HOST] $ cat /proc/self/cgroup
+0::/docker/70a2e43871971232b79b2d18f9c39867ad0ef347f3e3e98cf76e141b8d73dcbf
+```
+
+Schauen wir uns die aktiven Controller an.
+```sh
+[HOST] $ cat /sys/fs/cgroup/cgroup.controllers
+cpuset cpu io memory hugetlb pids rdma
+
+[HOST] $ cat /sys/fs/cgroup/cgroup.subtree_control
+cpuset cpu io memory hugetlb pids rdma
+```
+Beide Dateien enthalten die selben Controller. `cgroup.controllers` zeigt was verfügbar ist, `cgroup.subtree_control` zeigt was an child-cgroups weitergegeben wird. Da beide identisch sind, sind alle Controller bereits aktiv und wir können direkt loslegen.
+
+Wenn die Ausgabe leer ist, müssen wir die Controller noch aktivieren.
+Wir benötigen für diesen Schritt nur `memor, cpu und pids` Dafür müssen wir einfach die Werte in eine Datei schreiben.
+```sh
+[HOST] $ echo "+memory +cpu +pids" > /sys/fs/cgroup/cgroup.subtree_control
+```
+
+
+### Shell in Leaf-cgroup verschieben
+cgroups v2 hat eine wichtige Einschränkung: ein Verzeichnis kann entweder eigene Prozesse oder child-cgroups haben, aber nicht beides gleichzeitig. Das nennt sich "no internal processes" Regel.
+
+Der Root-cgroup hat bereits Prozesse drin. Deshalb müssen wir unsere Shell zuerst in ein eigenes Verzeichnis verschieben bevor wir `mycontainer` anlegen können. Wir wechseln in eine Root-Shell da wir direkt in cgroup-Dateien schreiben.
+
+```sh
+sudo -s
+mkdir /sys/fs/cgroup/init
+echo $$ > /sys/fs/cgroup/init/cgroup.procs
+```
+Wir prüfen ob unsere Shell jetzt in init liegt.
+
+```sh
+[HOST] $ cat /proc/self/cgroup
+0::/init
+```
+
+### Limits für unseren Container definieren
+Für unseren Container müssen wir ein neues Verzeichnis erstellen `mkdir /sys/fs/cgroup/mycontainer`. Lasst euch den Inhalt davon mit `ls` ausgeben. 
+```sh
+[HOST] $ ls /sys/fs/cgroup/mycontainer
+cgroup.controllers  cgroup.kill             cgroup.pressure  cgroup.subtree_control  cpu.pressure    io.pressure
+cgroup.events       cgroup.max.depth        cgroup.procs     cgroup.threads          cpu.stat        memory.pressure
+cgroup.freeze       cgroup.max.descendants  cgroup.stat      cgroup.type             cpu.stat.local
+```
+Ihr seht das dieses bereits mehrere Dateien enthällt. Der Kernel erstellt diese automatisch.
+
+Jetzt setzen wir die Limits. Wir begrenzen den Arbeitsspeicher auf 100MB, die CPU auf 50% und die maximale Anzahl an Prozessen auf 20.
+```sh
+[HOST] $ echo "104857600" > /sys/fs/cgroup/mycontainer/memory.max   # 100 MB
+[HOST] $ echo "50000 100000" > /sys/fs/cgroup/mycontainer/cpu.max   # 50% CPU (50ms von 100ms)
+[HOST] $ echo "20" > /sys/fs/cgroup/mycontainer/pids.max
+```
+
+### Limits testen
+Wir verschieben unsere Shell in die neue cgroup und testen die Limits.
+```sh
+[HOST] $ echo $$ > /sys/fs/cgroup/mycontainer/cgroup.procs
+[HOST] $ cat /proc/self/cgroup   # sollte 0::/mycontainer ausgeben
+```
+Memory-Limit testen - wir allokieren mehr RAM als erlaubt. Der Kernel soll den Prozess mit einem OOM-Kill beenden.
+```sh
+[HOST] $ python3 -c "x = bytearray(200 * 1024 * 1024)"
+Killed
+```
+Der Prozess wurde beendet weil er das 100MB Limit überschritten hat.
+
+CPU-Limit testen - wir starten einen Prozess der dauerhaft 100% CPU versucht zu nutzen.
+```sh
+[HOST] # dd if=/dev/zero of=/dev/null &
+[1] 49
+```
+Mit htop überprüfen: der dd Prozess sollte bei ~50% CPU gedeckelt sein obwohl er alles nehmen würde.
+Das `cpu.max 50000 100000` bedeutet: 50ms CPU-Zeit pro 100ms Periode - also 50%.
+
+Den Hintergrundprozess beenden `kill %1`.
+
+### Aufräumen
+Wir verlassen mycontainer indem wir die Shell zurück in init verschieben und löschen dann das Verzeichnis.
+```sh
+[HOST] echo $$ > /sys/fs/cgroup/init/cgroup.procs
+[HOST] rmdir /sys/fs/cgroup/mycontainer
+[HOST] exit   # Root-Shell verlassen
+```
+Damit haben wir mit reinen Dateizugriffen Ressourcenlimits für einen Prozess gesetzt - genau das macht Docker intern wenn ihr `--memory` oder `--cpus` als Flags übergebt.
+
+## IPC Namespace - Shared Memory Isolation
+Der `IPC` Namespace isoliert drei Kernel-Mechanismen: Shared Memory, Message Queues und Semaphoren.
+Ohne ihn können Prozesse in verschiedenen Containern denselben Shared Memory Bereich lesen und schreiben - ein direktes Sicherheitsproblem.
+
+Wir starten zwei Terminals und färben diese als `HOST` und `CONTAINER`.
+
+Im `HOST` legen wir ein Shared Memory Segment an und schauen es uns an.
+```sh
+[HOST] $ ipcmk -M 1024          # legt ein neues Segment an (1024 Bytes)
+Shared memory id: 5
+[HOST] $ ipcs -m                 # listet alle Shared Memory Segmente
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x4e5e7b24 5          root       644        1024       0
+```
+
+Wir wechseln in den `CONTAINER` Terminal und starten einen Prozess **ohne** IPC-Isolation.
+```sh
+sudo unshare --pid --fork --mount-proc /bin/bash
+export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
+```
+
+Schauen wir nach ob wir das Segment des Hosts sehen können.
+```sh
+[CONTAINER] $ ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x4e5e7b24 5          root       644        1024       0
+```
+Wir sehen das Segment des Hosts. Das heißt ein Prozess in diesem Container könnte theoretisch darauf zugreifen. Verlassen wir den Namespace mit `exit`.
+
+Jetzt starten wir den Container **mit** IPC-Isolation.
+```sh
+sudo unshare --ipc --pid --fork --mount-proc /bin/bash
+export PS1="\[\e[31m\][CONTAINER]\[\e[0m\] \$ "
+```
+
+```sh
+[CONTAINER] $ ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status
+```
+Leer. Der Container hat jetzt seinen eigenen IPC-Namespace und sieht das Segment des Hosts nicht mehr.
+
+Erstellen wir jetzt ein eigenes Segment innerhalb des Containers.
+```sh
+[CONTAINER] $ ipcmk -M 512
+Shared memory id: 0
+[CONTAINER] $ ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x...      0          root       644        512        0
+```
+Wechseln wir zurück in den `HOST` und prüfen ob das Segment des Containers sichtbar ist.
+```sh
+[HOST] $ ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x4e5e7b24 5          root       644        1024       0
+```
+Nur unser ursprüngliches Segment. Das Segment aus dem Container bleibt vollständig isoliert. Mit `exit` verlassen wir den Namespace wieder, das Segment wird automatisch vom Kernel aufgeräumt.
 
 
 ## Quellen
@@ -711,4 +935,6 @@ cat /proc/self/uid_map → zeigt die Mapping-Tabelle
 - https://manpages.ubuntu.com/manpages/jammy/de/man1/unshare.1.html
 - https://manpages.ubuntu.com/manpages/stonking/man8/ip-route.8.html
 - https://manpages.ubuntu.com/manpages/stonking/man1/chroot.1.html
+- https://manpages.ubuntu.com/manpages/bionic/man7/cgroups.7.html
+- https://github.com/opencontainers
 
